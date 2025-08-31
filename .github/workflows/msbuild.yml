@@ -1,0 +1,52 @@
+name: Build libvpx (VS2019 static /MT)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2019
+    strategy:
+      matrix:
+        include:
+          - platform: Win32
+            target: x86-win32-vs16
+          - platform: x64
+            target: x86_64-win64-vs16
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install NASM
+        run: choco install nasm -y
+
+      - name: Configure (static /MT)
+        shell: bash
+        run: |
+          set -e
+          ./configure --target=${{ matrix.target }} \
+                      --disable-shared \
+                      --enable-static \
+                      --enable-static-msvcrt \
+                      --disable-examples \
+                      --disable-docs \
+                      --disable-tools
+
+      - name: Build with MSBuild (v142)
+        run: msbuild build\msvs\libvpx.sln /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:PlatformToolset=v142
+
+      - name: Collect .lib
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts\${{ matrix.platform }} | Out-Null
+          $lib = Get-ChildItem -Recurse -Filter *.lib | Where-Object { $_.Name -match '^vpx.*\.lib$' } | Select-Object -First 1
+          if (-not $lib) { throw "vpx .lib not found" }
+          Copy-Item $lib.FullName "artifacts\${{ matrix.platform }}\vpx.lib"
+          # Optional: provide legacy filename expected by some projects
+          Copy-Item $lib.FullName "artifacts\${{ matrix.platform }}\vpxmt.lib"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libvpx-vs2019-${{ matrix.platform }}
+          path: artifacts/${{ matrix.platform }}/*
