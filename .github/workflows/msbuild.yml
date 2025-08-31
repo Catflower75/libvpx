@@ -35,7 +35,8 @@ jobs:
         run: .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
       - name: Install libvpx (static /MT)
-        run: .\vcpkg\vcpkg.exe install libvpx:%TRIPLET% --clean-after-build
+        shell: pwsh
+        run: .\vcpkg\vcpkg.exe install "libvpx:$env:TRIPLET" --clean-after-build
 
       - name: Show vcpkg state
         shell: pwsh
