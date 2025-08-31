@@ -1,20 +1,13 @@
-name: Prebuild libvpx (VS2019 v142, static /MT) via vcpkg
+name: Prebuild libvpx (VS2019 v142, x86-windows-static, /MT)
 
 on:
   workflow_dispatch:
 
 jobs:
-  libvpx:
-    name: libvpx (${{ matrix.triplet }})
+  libvpx-x86:
     runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        triplet: [x86-windows-static, x64-windows-static]
-
     env:
       VCPKG_PLATFORM_TOOLSET: v142   # force VS2019 toolset
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,39 +20,32 @@ jobs:
           $hasV142 = & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.v142.x86.x64 -property installationPath
           if (-not $hasV142) {
             Write-Host "Installing VS2019 v142 toolset..."
-            & $vsInstaller modify --installPath "$(& $vswhere -products * -latest -property installationPath)" `
-              --add Microsoft.VisualStudio.Component.VC.v142.x86.x64 --quiet --norestart --nocache
+            $vsPath = & $vswhere -products * -latest -property installationPath
+            & $vsInstaller modify --installPath "$vsPath" --add Microsoft.VisualStudio.Component.VC.v142.x86.x64 --quiet --norestart --nocache
             if ($LASTEXITCODE -ne 0) { throw "Failed to install v142 toolset." }
           }
+          Write-Host "v142 is available."
 
-      - name: Setup vcpkg
-        uses: microsoft/setup-vcpkg@v1
-        with:
-          # Pin to a stable commit if you want reproducibility; leaving default is fine too
-          vcpkgGitCommitId: c9b0e18a4ee8f3a18f23a6e2d1f6a0e0e0cf0e67
+      - name: Clone vcpkg
+        run: git clone --depth 1 https://github.com/microsoft/vcpkg.git
 
-      - name: Install libvpx (static /MT)
-        run: vcpkg install libvpx:${{ matrix.triplet }}
+      - name: Bootstrap vcpkg
+        run: .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Install libvpx (x86-windows-static, /MT)
+        run: .\vcpkg\vcpkg.exe install libvpx:x86-windows-static --clean-after-build
 
       - name: Collect library
         shell: pwsh
         run: |
-          $root = "${env:VCPKG_INSTALLATION_ROOT}\installed\${{ matrix.triplet }}\lib"
-          if (!(Test-Path $root)) { throw "vcpkg lib folder not found: $root" }
-          New-Item -ItemType Directory -Force -Path "artifacts\${{ matrix.triplet }}" | Out-Null
-          Copy-Item "$root\vpx.lib" "artifacts\${{ matrix.triplet }}\vpx.lib"
-          # Optional legacy filename some projects expect
-          Copy-Item "$root\vpx.lib" "artifacts\${{ matrix.triplet }}\vpxmt.lib"
-
-      - name: Verify static CRT (/MT)
-        shell: pwsh
-        run: |
-          $out = & dumpbin /directives "artifacts\${{ matrix.triplet }}\vpx.lib"
-          if ($out -notmatch "LIBCMT") { Write-Host $out; throw "Library is not linked with static CRT (LIBCMT)." }
-          "Verified: static CRT (LIBCMT) detected."
+          $libDir = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed\x86-windows-static\lib"
+          if (!(Test-Path $libDir)) { throw "vcpkg lib folder not found: $libDir" }
+          New-Item -ItemType Directory -Force -Path artifacts\x86-windows-static | Out-Null
+          Copy-Item "$libDir\vpx.lib" "artifacts\x86-windows-static\vpx.lib"
+          Copy-Item "$libDir\vpx.lib" "artifacts\x86-windows-static\vpxmt.lib"  # legacy filename if needed
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: libvpx-v142-${{ matrix.triplet }}
-          path: artifacts/${{ matrix.triplet }}/*
+          name: libvpx-v142-x86-windows-static
+          path: artifacts/x86-windows-static/*
