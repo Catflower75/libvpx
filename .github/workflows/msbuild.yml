@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-libvpx:
+  build:
     name: build (${{ matrix.platform }}, ${{ matrix.target }})
     runs-on: windows-2022
     strategy:
@@ -15,21 +15,50 @@ jobs:
             target: x86-win32-vs16
           - platform: x64
             target: x86_64-win64-vs16
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show installed VS toolsets (ensure v142 is present)
+      - name: Show installed Visual Studio instances
         shell: pwsh
         run: |
           & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -all -products * -format json | ConvertFrom-Json | `
             ForEach-Object { "$($_.displayName) $($_.catalog.productDisplayVersion) [$($_.installationPath)]" }
-          $v142 = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
-            -products * -requires Microsoft.VisualStudio.Component.VC.v142.x86.x64 -property installationPath
-          if (-not $v142) { throw "VS2019 v142 toolset not found on this runner." }
-          "Using v142 toolset from: $v142"
 
-      - name: Install NASM (for assembly)
+      - name: Ensure v142 toolset (install if missing)
+        shell: pwsh
+        run: |
+          $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
+          # Get a VS2022 installation path to modify
+          $vsInstallPath = & $vswhere -products * -latest -property installationPath
+          if (-not $vsInstallPath) {
+            throw "No Visual Studio installation found to modify."
+          }
+
+          # Check if v142 component exists
+          $hasV142 = & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.v142.x86.x64 -property installationPath
+          if (-not $hasV142) {
+            Write-Host "VS2019 v142 toolset not found. Installing component Microsoft.VisualStudio.Component.VC.v142.x86.x64..."
+            & $vsInstaller modify `
+              --installPath "$vsInstallPath" `
+              --add Microsoft.VisualStudio.Component.VC.v142.x86.x64 `
+              --quiet --norestart --nocache
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to install v142 toolset."
+            }
+          } else {
+            Write-Host "VS2019 v142 toolset already present."
+          }
+
+          # Verify again
+          $verify = & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.v142.x86.x64 -property installationPath
+          if (-not $verify) { throw "v142 toolset verification failed after install." }
+          Write-Host "Verified: v142 toolset available at: $verify"
+
+      - name: Install NASM (assembler)
         run: choco install nasm -y
 
       - name: Configure libvpx (static /MT)
@@ -51,10 +80,9 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path artifacts\${{ matrix.platform }} -Force | Out-Null
-          $lib = Get-ChildItem -Recurse -Filter *.lib | Where-Object { $_.Name -like "vpx*.lib" } | Select-Object -First 1
+          $lib = Get-ChildItem -Recurse -Filter vpx*.lib | Select-Object -First 1
           if (-not $lib) { throw "vpx .lib not found" }
           Copy-Item $lib.FullName "artifacts\${{ matrix.platform }}\vpx.lib"
-          # Optional legacy filename some projects expect
           Copy-Item $lib.FullName "artifacts\${{ matrix.platform }}\vpxmt.lib"
 
       - name: Verify static CRT (/MT)
