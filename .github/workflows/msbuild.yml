@@ -50,10 +50,9 @@ jobs:
           $vcpkgRoot = Resolve-Path ".\vcpkg"
           $libDir = Join-Path $vcpkgRoot "installed\x86-windows-static\lib"
           if (!(Test-Path $libDir)) {
-            # Fallback to debug lib to help diagnose; you likely want release
             $dbgDir = Join-Path $vcpkgRoot "installed\x86-windows-static\debug\lib"
             if (!(Test-Path $dbgDir)) {
-              throw "vcpkg lib folder not found. Checked: `n$libDir`n$dbgDir"
+              throw "vcpkg lib folder not found. Checked:`n$libDir`n$dbgDir"
             }
             $libDir = $dbgDir
           }
@@ -63,16 +62,45 @@ jobs:
           Copy-Item $lib.FullName "artifacts\x86-windows-static\vpx.lib"
           Copy-Item $lib.FullName "artifacts\x86-windows-static\vpxmt.lib"
 
-      - name: Verify static CRT (/MT) for release lib if present
+      - name: Locate dumpbin (optional)
         shell: pwsh
         run: |
-          if (Test-Path "artifacts\x86-windows-static\vpx.lib") {
-            $out = & dumpbin /directives "artifacts\x86-windows-static\vpx.lib"
-            if ($out -notmatch "LIBCMT") { Write-Host $out; throw "Library is not linked with static CRT (LIBCMT)." }
-            "Verified: static CRT (LIBCMT) detected."
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -products * -latest -property installationPath
+          if ($vsPath) {
+            $patterns = @(
+              Join-Path $vsPath "VC\Tools\MSVC\*\bin\Hostx64\x86\dumpbin.exe"
+              Join-Path $vsPath "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe"
+              Join-Path $vsPath "VC\Tools\MSVC\*\bin\Hostx86\x86\dumpbin.exe"
+            )
+            $dumpbin = Get-ChildItem -Path $patterns -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+            if ($dumpbin) {
+              "DUMPBIN=$($dumpbin.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+              Write-Host "Found dumpbin at $($dumpbin.FullName)"
+            } else {
+              "NO_DUMPBIN=1" | Out-File -FilePath $env:GITHUB_ENV -Append
+              Write-Warning "dumpbin.exe not found; CRT verification will be skipped."
+            }
           } else {
-            Write-Warning "Release lib not present; likely collected debug lib as fallback."
+            "NO_DUMPBIN=1" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Write-Warning "vswhere did not return a VS installation; CRT verification will be skipped."
           }
+
+      - name: Verify static CRT (/MT) if dumpbin is available
+        shell: pwsh
+        run: |
+          if (!(Test-Path "artifacts\x86-windows-static\vpx.lib")) {
+            Write-Warning "Release lib not present; skipping CRT verification."
+            exit 0
+          }
+          if ($env:NO_DUMPBIN -eq "1" -or -not (Test-Path $env:DUMPBIN)) {
+            Write-Warning "dumpbin not available; skipping CRT verification."
+            exit 0
+          }
+          $out = & "$env:DUMPBIN" /directives "artifacts\x86-windows-static\vpx.lib"
+          $out | Out-File -FilePath artifacts\x86-windows-static\dumpbin-directives.txt -Encoding ascii
+          if ($out -notmatch "LIBCMT") { Write-Host $out; throw "Library is not linked with static CRT (expected LIBCMT)." }
+          "Verified: static CRT (LIBCMT) detected."
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
