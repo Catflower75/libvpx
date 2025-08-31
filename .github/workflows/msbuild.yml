@@ -1,12 +1,14 @@
-name: Build libvpx (VS2019 static /MT)
+name: Build libvpx (VS2019 v142 static /MT)
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: windows-2019
+  build-libvpx:
+    name: build (${{ matrix.platform }}, ${{ matrix.target }})
+    runs-on: windows-2022
     strategy:
+      fail-fast: false
       matrix:
         include:
           - platform: Win32
@@ -17,10 +19,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install NASM
+      - name: Show installed VS toolsets (ensure v142 is present)
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -all -products * -format json | ConvertFrom-Json | `
+            ForEach-Object { "$($_.displayName) $($_.catalog.productDisplayVersion) [$($_.installationPath)]" }
+          $v142 = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -products * -requires Microsoft.VisualStudio.Component.VC.v142.x86.x64 -property installationPath
+          if (-not $v142) { throw "VS2019 v142 toolset not found on this runner." }
+          "Using v142 toolset from: $v142"
+
+      - name: Install NASM (for assembly)
         run: choco install nasm -y
 
-      - name: Configure (static /MT)
+      - name: Configure libvpx (static /MT)
         shell: bash
         run: |
           set -e
@@ -32,21 +44,28 @@ jobs:
                       --disable-docs \
                       --disable-tools
 
-      - name: Build with MSBuild (v142)
+      - name: Build with MSBuild (force v142)
         run: msbuild build\msvs\libvpx.sln /m /p:Configuration=Release /p:Platform=${{ matrix.platform }} /p:PlatformToolset=v142
 
-      - name: Collect .lib
+      - name: Collect artifacts
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path artifacts\${{ matrix.platform }} | Out-Null
-          $lib = Get-ChildItem -Recurse -Filter *.lib | Where-Object { $_.Name -match '^vpx.*\.lib$' } | Select-Object -First 1
+          New-Item -ItemType Directory -Path artifacts\${{ matrix.platform }} -Force | Out-Null
+          $lib = Get-ChildItem -Recurse -Filter *.lib | Where-Object { $_.Name -like "vpx*.lib" } | Select-Object -First 1
           if (-not $lib) { throw "vpx .lib not found" }
           Copy-Item $lib.FullName "artifacts\${{ matrix.platform }}\vpx.lib"
-          # Optional: provide legacy filename expected by some projects
+          # Optional legacy filename some projects expect
           Copy-Item $lib.FullName "artifacts\${{ matrix.platform }}\vpxmt.lib"
+
+      - name: Verify static CRT (/MT)
+        shell: pwsh
+        run: |
+          $out = & dumpbin /directives "artifacts\${{ matrix.platform }}\vpx.lib"
+          if ($out -notmatch "LIBCMT") { Write-Host $out; throw "Library is not linked with static CRT (LIBCMT)."; }
+          "Verified: static CRT (LIBCMT) detected."
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: libvpx-vs2019-${{ matrix.platform }}
+          name: libvpx-v142-${{ matrix.platform }}
           path: artifacts/${{ matrix.platform }}/*
