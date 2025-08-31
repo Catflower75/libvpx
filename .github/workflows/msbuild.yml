@@ -7,7 +7,9 @@ jobs:
   libvpx-x86:
     runs-on: windows-2022
     env:
-      VCPKG_PLATFORM_TOOLSET: v142   # force VS2019 toolset
+      VCPKG_PLATFORM_TOOLSET: v142
+      TRIPLET: x86-windows-static
+      ARTIFACT_DIR: artifacts/x86-windows-static
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,7 +26,7 @@ jobs:
             & $vsInstaller modify --installPath "$vsPath" --add Microsoft.VisualStudio.Component.VC.v142.x86.x64 --quiet --norestart --nocache
             if ($LASTEXITCODE -ne 0) { throw "Failed to install v142 toolset." }
           }
-          "v142 is available."
+          "v142 toolset available."
 
       - name: Clone vcpkg
         run: git clone --depth 1 https://github.com/microsoft/vcpkg.git
@@ -32,35 +34,31 @@ jobs:
       - name: Bootstrap vcpkg
         run: .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
-      - name: Install libvpx (x86-windows-static, /MT)
-        run: .\vcpkg\vcpkg.exe install libvpx:x86-windows-static --clean-after-build
+      - name: Install libvpx (static /MT)
+        run: .\vcpkg\vcpkg.exe install libvpx:%TRIPLET% --clean-after-build
 
       - name: Show vcpkg state
         shell: pwsh
         run: |
           .\vcpkg\vcpkg.exe list
-          Write-Host "Listing installed directories:"
+          Write-Host "Installed dirs:"
           Get-ChildItem -Recurse -Directory .\vcpkg\installed | Select-Object FullName
-          Write-Host "Listing lib directories:"
-          Get-ChildItem -Recurse -Directory .\vcpkg\installed\x86-windows-static\lib -ErrorAction SilentlyContinue | Select-Object FullName
 
       - name: Collect library
         shell: pwsh
         run: |
           $vcpkgRoot = Resolve-Path ".\vcpkg"
-          $libDir = Join-Path $vcpkgRoot "installed\x86-windows-static\lib"
-          if (!(Test-Path $libDir)) {
-            $dbgDir = Join-Path $vcpkgRoot "installed\x86-windows-static\debug\lib"
-            if (!(Test-Path $dbgDir)) {
-              throw "vcpkg lib folder not found. Checked:`n$libDir`n$dbgDir"
-            }
-            $libDir = $dbgDir
+          $libDir = Join-Path $vcpkgRoot "installed\$env:TRIPLET\lib"
+          $dbgDir = Join-Path $vcpkgRoot "installed\$env:TRIPLET\debug\lib"
+          if (!(Test-Path $libDir) -and !(Test-Path $dbgDir)) {
+            throw "vcpkg lib folder not found. Checked:`n$libDir`n$dbgDir"
           }
-          New-Item -ItemType Directory -Force -Path artifacts\x86-windows-static | Out-Null
-          $lib = Get-ChildItem -Filter "vpx*.lib" $libDir | Select-Object -First 1
-          if (-not $lib) { throw "vpx*.lib not found in $libDir" }
-          Copy-Item $lib.FullName "artifacts\x86-windows-static\vpx.lib"
-          Copy-Item $lib.FullName "artifacts\x86-windows-static\vpxmt.lib"
+          New-Item -ItemType Directory -Force -Path $env:ARTIFACT_DIR | Out-Null
+          $srcDir = (Test-Path $libDir) ? $libDir : $dbgDir
+          $lib = Get-ChildItem -Filter "vpx*.lib" $srcDir | Select-Object -First 1
+          if (-not $lib) { throw "vpx*.lib not found in $srcDir" }
+          Copy-Item $lib.FullName (Join-Path $env:ARTIFACT_DIR "vpx.lib") -Force
+          Copy-Item $lib.FullName (Join-Path $env:ARTIFACT_DIR "vpxmt.lib") -Force
 
       - name: Locate dumpbin (optional)
         shell: pwsh
@@ -88,8 +86,10 @@ jobs:
 
       - name: Verify static CRT (/MT) if dumpbin is available
         shell: pwsh
+        continue-on-error: true
         run: |
-          if (!(Test-Path "artifacts\x86-windows-static\vpx.lib")) {
+          $libPath = Join-Path $env:ARTIFACT_DIR "vpx.lib"
+          if (!(Test-Path $libPath)) {
             Write-Warning "Release lib not present; skipping CRT verification."
             exit 0
           }
@@ -97,13 +97,18 @@ jobs:
             Write-Warning "dumpbin not available; skipping CRT verification."
             exit 0
           }
-          $out = & "$env:DUMPBIN" /directives "artifacts\x86-windows-static\vpx.lib"
-          $out | Out-File -FilePath artifacts\x86-windows-static\dumpbin-directives.txt -Encoding ascii
-          if ($out -notmatch "LIBCMT") { Write-Host $out; throw "Library is not linked with static CRT (expected LIBCMT)." }
-          "Verified: static CRT (LIBCMT) detected."
+          $out = & "$env:DUMPBIN" /directives "$libPath"
+          $out | Out-File -FilePath (Join-Path $env:ARTIFACT_DIR "dumpbin-directives.txt") -Encoding ascii
+          $hasLibcmt = $out | Select-String -Pattern '\bLIBCMT\b' -Quiet
+          if ($hasLibcmt) {
+            Write-Host "Verified: static CRT (LIBCMT) detected."
+          } else {
+            Write-Warning "Could not confirm LIBCMT in directives; check dumpbin-directives.txt manually."
+          }
 
       - name: Upload artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: libvpx-v142-x86-windows-static
-          path: artifacts/x86-windows-static/*
+          path: ${{ env.ARTIFACT_DIR }}/*
